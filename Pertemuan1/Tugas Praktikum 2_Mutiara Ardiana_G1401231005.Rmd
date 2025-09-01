@@ -1,0 +1,211 @@
+---
+title: "MPDW Tugas Praktikum 2"
+author: "Mutiara Ardiana"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    rmdformats::readthedown
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Library
+
+```{r}
+library("forecast")
+library("graphics")
+library("tseries")
+library("ggplot2")
+library("dplyr")
+library("TTR")
+library("tidyverse")
+library("rio")
+```
+
+# Data
+
+Dataset yang digunakan berisi **deret waktu harian** pendapatan (*revenue USD*) Google Financial Daily Market selama **15 Juni 2024 s.d. 31 Desember 2024**. Total observasi sekitar **200 titik** yang tersusun berurutan menurut tanggal sehingga cocok dimodelkan sebagai time series.
+
+```{r}
+dt <- import("C:/Users/MUTIARA ARDIANA/OneDrive/Desktop/SEMESTER 5/[3] MPDW/Data Mutiara_Google Financial.xlsx")
+```
+
+```{r}
+View(dt)
+str(dt)
+dim(dt)
+```
+
+```{r}
+n_train <- 160
+
+dt <- dt %>%
+    arrange(Date) %>%
+  mutate(Set = if_else(row_number() <= n_train, "Train", "Test"),
+         Set = factor(Set, levels = c("Train","Test")))
+
+glimpse(dt)
+summary(dt$Revenue)
+sum(is.na(dt$Revenue))
+```
+
+# Eksplorasi Data
+
+## Split Data
+
+```{r}
+n <- nrow(dt)
+n_train <- 160        
+h <- n - n_train    
+```
+
+## Plot Data
+
+```{r}
+ggplot(dt, aes(Date, Revenue, color = Set)) +
+  geom_line() +
+  scale_color_manual(values=c("Train"="blue","Test"="red")) +
+  labs(x="Periode", y="Pendapatan", color = NULL)
+```
+
+## Eksplorasi Data
+
+### Frekuensi mingguan m = 7
+
+```{r}
+y <- ts(dt$Revenue, frequency = 7)
+y_train <- window(y, end = c(1, n_train)) 
+y_test  <- window(y, start = c(1, n_train+1))
+length(y_train); length(y_test)
+```
+
+### ACF/PCAF, Dekomposisi
+
+```{r}
+autoplot(y_train) + labs(title="Train series")
+ggAcf(y_train) + labs(title="ACF - Train")
+ggPacf(y_train) + labs(title="PACF - Train")
+
+# Dekomposisi STL untuk cek musiman mingguan (m=7)
+fit_stl <- stl(y_train, s.window = "periodic")
+autoplot(fit_stl)
+```
+
+Dari eksplorasi diatas, plot deret menunjukkan **fluktuasi sempit di sekitar level 154,5-155,5 tanpa tren naik/turun yang jelas**. Pada STL dekomposisi untuk mengecek musiman mingguan (m=7), terlihat bahwa **komponen musiman kuat dan teratur per 7 hari**. Tren terlihat **datar/bergelombang ringan** dan tidak dominan. ACF/PCAF menunjukkan **spike signifikan pada lag 7** yang mengonfirmasi adanya musiman mingguan.
+
+# METODE ANALISIS
+
+```{r}
+library(forecast)
+h <- length(y_test)     
+h
+
+```
+
+## Fit Model Kandidat
+
+Berikut adalah model yang dibandingkan dari data latih. Semua model kemudian diramal ke horizon data uji dan dievaluasi dengan MAPE, RMSE, dan sebagainya.
+
+```{r}
+# Benchmark
+fit_naive  <- naive(y_train,  h = h)
+fit_snaive <- snaive(y_train, h = h)        # musiman mingguan (m=7)
+
+# ETS tanpa musiman (SES)
+fit_ets_ann <- ets(y_train, model = "ANN") 
+
+# ETS musiman aditif (sesuai pola STL)
+fit_ets_ana <- ets(y_train, model = "ANA")  
+
+# ARIMA musiman (otomatis)
+fit_arima <- auto.arima(
+  y_train, seasonal = TRUE, stepwise = FALSE, approximation = FALSE
+)
+fit_naive; fit_snaive; fit_ets_ann; fit_ets_ana; fit_arima
+
+```
+
+## Forecast & Evaluasi Akurasi
+
+Adapun hasil ramalan dan evaluasi akurasi setiap model adalah sebagai berikut.
+
+```{r}
+fc_naive    <- fit_naive
+fc_snaive   <- fit_snaive
+fc_ets_ann  <- forecast(fit_ets_ann, h = h)
+fc_ets_ana  <- forecast(fit_ets_ana, h = h)
+fc_arima    <- forecast(fit_arima,   h = h)
+
+tab_acc <- dplyr::bind_rows(
+  tibble::as_tibble(accuracy(fc_naive,   y_test)) %>% dplyr::mutate(model="Naive"),
+  tibble::as_tibble(accuracy(fc_snaive,  y_test)) %>% dplyr::mutate(model="S-Naive (m=7)"),
+  tibble::as_tibble(accuracy(fc_ets_ann, y_test)) %>% dplyr::mutate(model="ETS(ANN) / SES"),
+  tibble::as_tibble(accuracy(fc_ets_ana, y_test)) %>% dplyr::mutate(model="ETS(A,N,A)"),
+  tibble::as_tibble(accuracy(fc_arima,   y_test)) %>% dplyr::mutate(model="ARIMA musiman")
+) %>% dplyr::select(model, ME, RMSE, MAE, MAPE, MASE, ACF1)
+
+tab_acc %>% dplyr::arrange(MAPE)
+
+```
+
+Berdasarkan hasil evaluasi akurasi diatas, terlihat bahwa **ETS(A,N,A)** memberi nilai M**APE paling kecil** dan modelnya simpel. Sementara itu, **RSME terkecil** di dapat oleh **ARIMA musiman** dengan selisih tipis. Maka dari itu, akan dibandingan kedua model tersebut.
+
+# Model Terbaik Sementara
+
+## Diagnostik Residu (model sementara)
+
+```{r}
+# ETS musiman aditif
+checkresiduals(fit_ets_ana)
+
+# ARIMA musiman
+checkresiduals(fit_arima)
+```
+
+```{r}
+autoplot(fc_ets_ana) + autolayer(y_test, series="Actual (Test)") +
+  labs(title="ETS(A,N,A) vs Aktual (Data Uji)", y = "Revenue")
+
+autoplot(fc_arima) + autolayer(y_test, series="Actual (Test)") +
+  labs(title="ARIMA Musiman vs Aktual (Data Uji)", y = "Revenue")
+
+```
+
+Hasil **checkresiduals** menunjukkan bahwa kedua kandidat model lolos uji diagnostik: untuk **ETS(A,N,A)** p-value uji Ljung–Box = **0,617**, sedangkan untuk **ARIMA(0,0,0)(0,0,1)[7] dengan mean** p-value = **0,901**. Nilai p-value yang lebih besar dari 0,05 pada kedua model menandakan residu berperilaku seperti **white noise** (tidak menyisakan autokorelasi yang berarti), sehingga keduanya **valid** secara statistik.
+
+Namun, berdasarkan tabel akurasi pada data uji, **ETS(A,N,A)** memberikan **MAPE terkecil (\~0,247%)** dengan model yang lebih sederhana, menjelaskan pola musiman mingguan dengan baik, menghasilkan kesalahan relatif yang paling kecil, dan lulus semua pemeriksaan residu, maka selanjutnya model yang diutamakan adalah **ETS(A,N,A)**
+
+# ETS(A,N,A)
+
+## Refit & Ramal
+
+```{r}
+library(forecast)
+fit_final <- ets(y, model = "ANA")
+
+h_final <- 14 
+fc_final <- forecast(fit_final, h = h_final)
+
+autoplot(fc_final) +
+  ggplot2::labs(title = paste0("Forecast ", h_final, " Hari ke Depan - ETS(A,N,A)"),
+                x = "Tanggal", y = "Revenue")
+
+# Tabel hasil (titik ramalan & interval)
+as_tibble(fc_final)
+```
+
+```{r}
+# Ringkasan model ETS
+summary(fit_final)
+
+```
+
+Parameter model **ETS(A,N,A)** menunjukkan bahwa deret berada pada level yang sangat stabil. Nilai **alpha ≈ 0,0001** menandakan pembaruan level berjalan amat pelan sehingga model memperlakukan rata-rata level hampir konstan dari waktu ke waktu. Nilai **gamma ≈ 0,0001** mengindikasikan komponen musiman mingguan juga nyaris tidak berubah antarminggu, pola harian dalam satu minggu relatif tetap. Vektor **indeks musiman 7 hari** seimbang (jumlahnya mendekati nol), yang berarti komponen musiman aditif terestimasi dengan baik dan tidak menggeser level secara sistematis.
+
+Berdasarkan model tersebut, **ramalan 14 hari ke depan** memusat di kisaran **154,73–154,99** (rata-rata sekitar **154,8 USD**). Ketidakpastian yang wajar ditunjukkan oleh **interval prediksi 95%** sekitar **153,73–155,98**. Fan chart mempertahankan gelombang mingguan yang sama seperti pada data historis, konsisten dengan temuan dekomposisi STL dan ACF/PACF bahwa musiman mingguan adalah pola dominan sementara tren jangka pendek tidak signifikan.
+
+# Kesimpulan
+
+Data pendapatan Google ini stabil pada levelnya dan memiliki musiman mingguan yang konsisten, sehingga **ETS(A,N,A)** merupakan pilihan yang tepat. Model menghasilkan akurasi sangat baik **(MAPE \~0,25%)** dan residu yang memenuhi asumsi **white noise**. Untuk dua minggu mendatang, pendapatan diperkirakan tetap di sekitar **154,8 USD** dengan variasi normal ±1 poin.
